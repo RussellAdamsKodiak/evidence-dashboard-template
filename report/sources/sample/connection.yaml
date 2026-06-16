@@ -1,2 +1,4 @@
 name: sample
-type: csv
+type: duckdb
+options:
+  filename: ":memory:"
