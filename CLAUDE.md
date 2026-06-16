@@ -119,5 +119,18 @@ without touching the script.
 Push to `main` — GitHub Actions builds Evidence and deploys to GitHub Pages.
 Enable GitHub Pages in repo Settings → Pages → Source: GitHub Actions.
 
+**Base path**: The workflow automatically sets `deployment.basePath` in
+`evidence.config.yaml` to `/<repo-name>` at build time, so GitHub Pages
+project sites (which serve from a subpath) work out of the box.
+
+If you configure a **custom domain** (Settings → Pages → Custom domain),
+assets serve from root and the basePath should be empty. In that case,
+change the workflow step to:
+```yaml
+- name: Set base path for GitHub Pages
+  run: printf '\ndeployment:\n  basePath: \n' >> evidence.config.yaml
+```
+Or remove the step entirely.
+
 The sample dashboard (CSV data) works without running any fetch scripts,
 so the first deploy is functional immediately after forking.

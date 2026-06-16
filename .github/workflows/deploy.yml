@@ -32,6 +32,9 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Set base path for GitHub Pages
+        run: printf '\ndeployment:\n  basePath: /%s\n' "${{ github.event.repository.name }}" >> evidence.config.yaml
+
       - name: Process sources
         run: npm run sources
 
