@@ -30,7 +30,7 @@ jobs:
           cache-dependency-path: report/package-lock.json
 
       - name: Install dependencies
-        run: npm install --legacy-peer-deps
+        run: npm install
 
       - name: Build Evidence
         run: npm run build
