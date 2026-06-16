@@ -1,0 +1,10 @@
+node_modules/
+.evidence/
+report/build/
+report/.evidence/
+report/node_modules/
+**/*.parquet
+.env
+fetch/**/.venv/
+__pycache__/
+*.pyc

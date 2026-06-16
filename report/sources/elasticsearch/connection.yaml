@@ -1,0 +1,4 @@
+name: elasticsearch
+type: duckdb
+options:
+  filename: ":memory:"

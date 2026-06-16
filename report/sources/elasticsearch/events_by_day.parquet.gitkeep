@@ -1,0 +1,2 @@
+Parquet files are written here by fetch/elasticsearch/fetch.py and are gitignored.
+Run the fetch script to populate this directory before building the Elasticsearch dashboard.
