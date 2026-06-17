@@ -2,8 +2,9 @@
 """
 Fetch event counts from Elasticsearch and write parquet for Evidence.
 
-Output: ../../report/sources/elasticsearch/events_by_day.parquet
-Schema: date (date), log_level (str), count (int)
+Outputs (in report/sources/elasticsearch/):
+  events_by_severity.parquet  — date, severity, count
+  events_by_truck.parquet     — date, truck_name, count
 
 Usage:
     python fetch.py              # last 30 days
@@ -19,8 +20,8 @@ from pathlib import Path
 
 try:
     import pandas as pd
+    import requests as http
     from dotenv import load_dotenv
-    from elasticsearch import Elasticsearch
 except ImportError:
     print("Missing dependencies. Run: pip install -r requirements.txt")
     sys.exit(1)
@@ -28,26 +29,40 @@ except ImportError:
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Config — edit these for your index and field names
+# Config — edit or override via .env
 # ---------------------------------------------------------------------------
-ES_URL       = os.environ["ES_URL"]          # https://your-cluster.es.io:9200
-ES_API_KEY   = os.environ["ES_API_KEY"]      # base64 API key from Kibana
-INDEX        = os.getenv("ES_INDEX", "logs-*")
-TIMESTAMP_FIELD = os.getenv("ES_TIMESTAMP_FIELD", "@timestamp")
-LEVEL_FIELD     = os.getenv("ES_LEVEL_FIELD", "log.level")
+ES_URL           = os.environ["ES_URL"]
+ES_API_KEY       = os.getenv("ES_API_KEY")
+ES_USERNAME      = os.getenv("ES_USERNAME")
+ES_PASSWORD      = os.getenv("ES_PASSWORD")
+INDEX            = os.getenv("ES_INDEX", "logs-*")
+TIMESTAMP_FIELD  = os.getenv("ES_TIMESTAMP_FIELD", "@timestamp")
+SEVERITY_FIELD   = os.getenv("ES_SEVERITY_FIELD", "severity")   # or "log.level"
+ENTITY_FIELD     = os.getenv("ES_TRUCK_FIELD", "truck_name")     # any grouping keyword
+TOP_N            = int(os.getenv("ES_TOP_N", "15"))
+REQUEST_TIMEOUT  = int(os.getenv("ES_TIMEOUT_S", "120"))
 
 OUT_DIR = Path(__file__).parent.parent.parent / "report" / "sources" / "elasticsearch"
-OUT_FILE = OUT_DIR / "events_by_day.parquet"
 # ---------------------------------------------------------------------------
+
+
+def auth_header():
+    if ES_API_KEY:
+        return {"Authorization": f"ApiKey {ES_API_KEY}"}
+    return {}
+
+
+def auth_tuple():
+    if ES_USERNAME and ES_PASSWORD:
+        return (ES_USERNAME, ES_PASSWORD)
+    return None
 
 
 def build_query(days: int) -> dict:
     since = (date.today() - timedelta(days=days)).isoformat()
     return {
         "size": 0,
-        "query": {
-            "range": {TIMESTAMP_FIELD: {"gte": since}}
-        },
+        "query": {"range": {TIMESTAMP_FIELD: {"gte": since}}},
         "aggs": {
             "by_day": {
                 "date_histogram": {
@@ -56,36 +71,45 @@ def build_query(days: int) -> dict:
                     "format": "yyyy-MM-dd",
                 },
                 "aggs": {
-                    "by_level": {
-                        "terms": {
-                            "field": LEVEL_FIELD,
-                            "size": 20,
-                            "missing": "unknown",
-                        }
-                    }
+                    "by_severity": {
+                        "terms": {"field": SEVERITY_FIELD, "size": 20, "missing": "UNKNOWN"}
+                    },
+                    "by_entity": {
+                        "terms": {"field": ENTITY_FIELD, "size": TOP_N, "missing": "unknown"}
+                    },
                 },
             }
         },
     }
 
 
-def fetch(days: int) -> pd.DataFrame:
-    es = Elasticsearch(ES_URL, api_key=ES_API_KEY)
-    resp = es.search(index=INDEX, body=build_query(days))
+def fetch(days: int):
+    url = f"{ES_URL.rstrip('/')}/{INDEX}/_search"
+    resp = http.post(
+        url,
+        auth=auth_tuple(),
+        headers={**auth_header(), "Content-Type": "application/json"},
+        json=build_query(days),
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
 
-    rows = []
-    for day_bucket in resp["aggregations"]["by_day"]["buckets"]:
+    severity_rows, entity_rows = [], []
+    for day_bucket in data["aggregations"]["by_day"]["buckets"]:
         day = day_bucket["key_as_string"]
-        for level_bucket in day_bucket["by_level"]["buckets"]:
-            rows.append({
-                "date": day,
-                "log_level": level_bucket["key"],
-                "count": level_bucket["doc_count"],
-            })
+        for b in day_bucket["by_severity"]["buckets"]:
+            severity_rows.append({"date": day, "severity": b["key"], "count": b["doc_count"]})
+        for b in day_bucket["by_entity"]["buckets"]:
+            entity_rows.append({"date": day, "truck_name": b["key"], "count": b["doc_count"]})
 
-    df = pd.DataFrame(rows, columns=["date", "log_level", "count"])
-    df["date"] = pd.to_datetime(df["date"]).dt.date
-    return df
+    df_sev = pd.DataFrame(severity_rows, columns=["date", "severity", "count"])
+    df_sev["date"] = pd.to_datetime(df_sev["date"]).dt.date
+
+    df_entity = pd.DataFrame(entity_rows, columns=["date", "truck_name", "count"])
+    df_entity["date"] = pd.to_datetime(df_entity["date"]).dt.date
+
+    return df_sev, df_entity
 
 
 def main():
@@ -94,19 +118,21 @@ def main():
     parser.add_argument("--force", action="store_true", help="skip same-day cache")
     args = parser.parse_args()
 
-    if not args.force and OUT_FILE.exists():
-        mtime = date.fromtimestamp(OUT_FILE.stat().st_mtime)
+    sev_file = OUT_DIR / "events_by_severity.parquet"
+    if not args.force and sev_file.exists():
+        mtime = date.fromtimestamp(sev_file.stat().st_mtime)
         if mtime == date.today():
-            print(f"Cache hit ({OUT_FILE.name} written today). Use --force to refresh.")
+            print(f"Cache hit (written today). Use --force to refresh.")
             return
 
     print(f"Fetching last {args.days} days from {ES_URL} index={INDEX} ...")
-    df = fetch(args.days)
-    print(f"  {len(df)} rows")
+    df_sev, df_entity = fetch(args.days)
+    print(f"  {len(df_sev)} severity rows, {len(df_entity)} entity rows")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(OUT_FILE, index=False)
-    print(f"  Wrote {OUT_FILE}")
+    df_sev.to_parquet(sev_file, index=False)
+    df_entity.to_parquet(OUT_DIR / "events_by_truck.parquet", index=False)
+    print(f"  Wrote {OUT_DIR}/")
 
 
 if __name__ == "__main__":
